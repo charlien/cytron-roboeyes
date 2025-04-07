@@ -1,156 +1,196 @@
 """
 DESCRIPTION:
-Demo-Code for MOTION 2350 Pro
-This demo code is written in CircuitPython and it serves
-as an easy quality check when you first receive the board.
-
-It plays a melody upon power up (slide power switch to ON)
-and shows running lights (blue LEDs) at the same time.
-
-Press GP20 button to play a short melody, lights up all 
-blue LEDs, motor LEDs.
-Press GP21 will execute similar action but in reverse direction.
-
-ROBO PICO also has four DC motors quick test buttons 
-built-in. You may press the onboard M1A, M1B, M2A or M2B 
-push buttons to run your motors without writing any code.
+This example code will uses MOTION 2350 Pro
+to control the Servos.
 
 AUTHOR  : Cytron Technologies Sdn Bhd
 WEBSITE  : www.cytron.io
 EMAIL    : support@cytron.io
+
+REFERENCE:
+Tutorial link:
+https://cytron.io/tutorial/get-started-motion-2350-pro-circuitpython-micro-servo-motor
 """
-import board
-import neopixel
+# Import neccessary libraries
 import time
-import digitalio
-import simpleio
+import board # type: ignore
+import digitalio # type: ignore
+import pwmio # type: ignore
+from radar import RadarSensor
+import servo # type: ignore
+import asyncio # type: ignore
+import busio # type: ignore
+import microcontroller # type: ignore
 
-INTRO_MELODY_NOTE = [392, 392, 440, 392, 523, 494, 392, 392, 440, 392, 587, 523]
-INTRO_MELODY_DURATION = [0.3, 0.1, 0.4, 0.4, 0.4, 0.8, 0.3, 0.1, 0.4, 0.4, 0.4, 0.8]
 
-BTN20_MELODY_NOTE = [494, 466, 440, 415, 392, 370, 349, 330, 311, 294, 277, 262]
-BTN20_MELODY_DURATION = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4]
+from adafruit_debouncer import Button
 
-BTN21_MELODY_NOTE = [262, 294, 330, 349, 392, 440, 494, 523, 587, 659, 698, 784]
-BTN21_MELODY_DURATION = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.4]
 
-#Define pin connected to piezo buzzer
-PIEZO_PIN = board.GP22
+RED = (255, 0, 0)
+YELLOW = (255, 150, 0)
+GREEN = (0, 255, 0)
+CYAN = (0, 255, 255)
+BLUE = (0, 0, 255)
+PURPLE = (180, 0, 255)
+WHITE = (255, 255, 255)
+OFF = (0, 0, 0)
 
-# Define the GPIO pin numbers we'll use
-pins_top = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8, 11, 10]
-pins_bot = [16, 17, 18, 19, 26, 27, 28, 29, 12, 13, 14, 15]
 
-# Set up each pin as an output
-leds_top = [digitalio.DigitalInOut(getattr(board, f'GP{pin}')) for pin in pins_top]
-for led in leds_top:
-    led.direction = digitalio.Direction.OUTPUT
-leds_bot = [digitalio.DigitalInOut(getattr(board, f'GP{pin}')) for pin in pins_bot]
-for led in leds_bot:
-    led.direction = digitalio.Direction.OUTPUT
-    
-# Initialize the 2 Neopixel RGB LEDs on pin GP18
-pixels = neopixel.NeoPixel(board.GP23, 2)
-# Clear Neopixel RGB LED
-pixels.fill(0)
-# Set pixel brightness
-pixels.brightness = 0.3
 
-#Initialize buttons
-btn1 = digitalio.DigitalInOut(board.GP20)
-btn2 = digitalio.DigitalInOut(board.GP21)
-btn1.direction = digitalio.Direction.INPUT
-btn2.direction = digitalio.Direction.INPUT
-btn1.pull = digitalio.Pull.UP
-btn2.pull = digitalio.Pull.UP
+"""
+eyeball mapping (back view)
 
-#Play melody during start up  
-for i in range(len(INTRO_MELODY_DURATION)):
-    #The board will not work with 0 frequency, so everytime the frequency is 0, it will rest for a duration of time
-    leds_top[i].value = True
-    leds_bot[i].value = True
-    
-    if INTRO_MELODY_NOTE[i] == 0:
-        time.sleep(INTRO_MELODY_DURATION[i])
-    else:
-        # Play melody tones
-        simpleio.tone(PIEZO_PIN, INTRO_MELODY_NOTE[i], duration=INTRO_MELODY_DURATION[i])
+       100
+        |
+  134 ------- 40 (look right)
+        |
+        35 
+"""
+
+EYEBALL_HORIZONTAL_RANGE = (40, 135)
+EYEBALL_VERTICAL_RANGE = (35, 100)
+
+
+# need to give some tolerance since not all PCA boards are the same or else
+# the servos MG90s can actually go from 500 too 2500ms
+# [600-2400] translates to 599.6 us to 2.398 ms with the pi pico 2 
+min_pulse = 600
+max_pulse = 2400
+
+# servos
+# 0 - eye x
+# 1 - eye y
+# 2 - lid top left (front view)
+# 3 - lid bottom left (front view)
+# 4 - lid top right (front view)
+# 5 - lid bottom right  (front view)
+
+servos = []
+lids = []
+last_blink = 0
+auto_blink = True
+blink_range = (3, 7)
+
+DEBUG_LOG = True
+
+
+i2c = busio.I2C(board.GP17, board.GP16)
+# radar_uart = busio.UART(board.GP0, board.GP1, baudrate=256000)
+radar_uart = busio.UART(board.GP24, board.GP25, baudrate=256000)
+
+button_pins: list[str] = ["GP20", "GP21"]
+buttons: dict[str, Button] = {}
+
+async def init_buttons():
+    for pin in button_pins:
+        button = digitalio.DigitalInOut(getattr(board, pin))
+        button.direction = digitalio.Direction.INPUT
+        button.pull = digitalio.Pull.UP
+        buttons[pin] = Button(button)
+
+async def monitor_buttons(period_sec=0.001):
+    # lazy init if buttons are not initialized
+    if buttons == {}:
+        await init_buttons()
+
+    while True:
+        for pin in button_pins:
+            buttons[pin].update()
+            if buttons[pin].pressed:
+                print(f"Button {pin} pressed")
+        await asyncio.sleep(period_sec)
+
+async def servo_test():
+    global servos
+
+    # Create a PWMOut object on the control pin.
+    # pwm1 = pwmio.PWMOut(board.GP0, duty_cycle=0, frequency=50)
+    # pwm2 = pwmio.PWMOut(board.GP1, duty_cycle=0, frequency=50)
+    # pwm3 = pwmio.PWMOut(board.GP2, duty_cycle=0, frequency=50)
+    # pwm4 = pwmio.PWMOut(board.GP3, duty_cycle=0, frequency=50)
+    pwm5 = pwmio.PWMOut(board.GP4, duty_cycle=0, frequency=50)
+    pwm6 = pwmio.PWMOut(board.GP5, duty_cycle=0, frequency=50)
+    pwm7 = pwmio.PWMOut(board.GP6, duty_cycle=0, frequency=50)
+    pwm8 = pwmio.PWMOut(board.GP7, duty_cycle=0, frequency=50)
+
+
+    # # You might need to calibrate the min_pulse (pulse at 0 degrees) and max_pulse (pulse at 180 degrees) to get an accurate servo angle.
+    # # The pulse range is 750 - 2250 by default (if not defined).
+
+    # # Initialize Servo objects.
+    # servo1 = servo.Servo(pwm1, min_pulse=min_pulse, max_pulse=max_pulse)
+    # servo2 = servo.Servo(pwm2, min_pulse=min_pulse, max_pulse=max_pulse)
+    # servo3 = servo.Servo(pwm3, min_pulse=min_pulse, max_pulse=max_pulse)
+    # servo4 = servo.Servo(pwm4, min_pulse=min_pulse, max_pulse=max_pulse)
+    servo5 = servo.Servo(pwm5, min_pulse=min_pulse, max_pulse=max_pulse)
+    servo6 = servo.Servo(pwm6, min_pulse=min_pulse, max_pulse=max_pulse)
+    servo7 = servo.Servo(pwm7, min_pulse=min_pulse, max_pulse=max_pulse)
+    servo8 = servo.Servo(pwm8, min_pulse=min_pulse, max_pulse=max_pulse)
+
+    # servos = [servo1, servo2, servo3, servo4, servo5, servo6, servo7, servo8]
+    servos = [servo5, servo6, servo7, servo8]
+
+    while True:
+        # Sweep from 0 to 180
+        for angle in range(0, 181, 10):
+            for i, s in enumerate(servos):
+                print(f'servo {i}: {angle}')
+                s.angle = angle
+            await asyncio.sleep(0.1)
         
-    leds_top[i].value = False
-    leds_bot[i].value = False
-    
-pixels[0] = (100, 0, 0)
-pixels[1] = (100, 0, 0)
-pixels.show()
-time.sleep(0.3)
-pixels[0] = (0, 100, 0)
-pixels[1] = (0, 100, 0)
-pixels.show()
-time.sleep(0.3)
-pixels[0] = (0, 0, 100)
-pixels[1] = (0, 0, 100)
-pixels.show()
-time.sleep(0.3)
-pixels[0] = (0, 0, 0)
-pixels[1] = (0, 0, 0)
-    
-# Main loop
-while True:
-    # Check button (GP20) is pressed
-    if not btn1.value:
-        for i in range(len(BTN20_MELODY_DURATION)):
-            #The board will not work with 0 frequency, so everytime the frequency is 0, it will rest for a duration of time
-            leds_top[i].value = True
-            
-            if BTN20_MELODY_NOTE[i] == 0:
-                time.sleep(BTN20_MELODY_DURATION[i])
-            else:
-                # Play melody tones
-                simpleio.tone(PIEZO_PIN, BTN20_MELODY_NOTE[i], duration=BTN20_MELODY_DURATION[i])
-                
-            leds_top[i].value = False
-            
-        pixels[0] = (100, 0, 100)
-        pixels.show()
-        time.sleep(0.1)
-        pixels[0] = (0, 0, 0)
+        await asyncio.sleep(3)
+
+        # Sweep from 180 back to 0
+        for angle in range(180, -1, -10):
+            for i, s in enumerate(servos):
+                print(f'servo {i}: {angle}')
+                s.angle = angle
+            await asyncio.sleep(0.1)
+
+        await asyncio.sleep(3)
         
-        pixels[1] = (100, 0, 100)
-        pixels.show()
-        time.sleep(0.2)
-        pixels[1] = (0, 0, 0)
-            
-        for i in reversed(range(len(leds_bot))):
-            leds_bot[i].value = True
-            time.sleep(0.1)
-            leds_bot[i].value = False
-              
-    # Check button (GP21) is pressed
-    elif not btn2.value:
-        
-        for i in range(len(BTN21_MELODY_DURATION)):
-            #The board will not work with 0 frequency, so everytime the frequency is 0, it will rest for a duration of time
-            leds_bot[i].value = True
-            
-            if BTN21_MELODY_NOTE[i] == 0:
-                time.sleep(BTN21_MELODY_DURATION[i])
-            else:
-                # Play melody tones
-                simpleio.tone(PIEZO_PIN, BTN21_MELODY_NOTE[i], duration=BTN21_MELODY_DURATION[i])
-                
-            leds_bot[i].value = False
-            
-        pixels[1] = (100, 0, 100)
-        pixels.show()
-        time.sleep(0.2)
-        pixels[1] = (0, 0, 0)
-            
-        pixels[0] = (100, 0, 100)
-        pixels.show()
-        time.sleep(0.2)
-        pixels[0] = (0, 0, 0)
-        
-        for i in reversed(range(len(leds_top))):
-            leds_top[i].value = True
-            time.sleep(0.1)
-            leds_top[i].value = False
+async def print_devices(i2c_bus):
+    while not i2c_bus.try_lock():
+        print("waiting for i2c...")
+        await asyncio.sleep(0.1)
+    try:
+        print(
+            "I2C addresses found:",
+            [hex(device_address) for device_address in i2c_bus.scan()],
+        )
+    finally:  # unlock the i2c bus when ctrl-c'ing out of the loop
+        i2c_bus.unlock()
+
+
+async def gc_cleanup(interval=10):
+    import gc # type: ignore
+    while True:
+        gc.collect()
+        if DEBUG_LOG: print(f'free: {gc.mem_free() / 1000:.2f}kB allocated: {gc.mem_alloc()/ 1000:.2f}kB')        
+        await asyncio.sleep(interval)
+
+
+async def main():
+
+    import gc
+    gc.collect()
+
+    import supervisor # type: ignore
+    supervisor.runtime.autoreload = False  # CirPy 8 and above
+    print("supervisor.runtime.autoreload = False")
+
+    await print_devices(i2c)
+
+    radar_sensor = RadarSensor(radar_uart)
+
+
+    tasks = []
+    tasks.append(asyncio.create_task(gc_cleanup()))
+    tasks.append(asyncio.create_task(servo_test()))
+    tasks.append(asyncio.create_task(monitor_buttons()))
+    tasks.append(asyncio.create_task(radar_sensor.run(debug=True)))
+
+    await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
+    asyncio.run(main()) # type: ignore
