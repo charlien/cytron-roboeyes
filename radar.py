@@ -6,6 +6,8 @@ from micropython import const # type: ignore
 import asyncio
 import struct
 from adafruit_debouncer import Debouncer, Button
+from eye_angle_provider import EyeAngleProvider
+from adafruit_simplemath import map_range
 
 TARGET_COUNT = const(3)
 # HLK-LD2450 Protocol Constants
@@ -81,7 +83,7 @@ class KalmanFilter:
         
         return self.estimate
     
-class RadarSensor:
+class RadarSensor(EyeAngleProvider):
     def __init__(self, uart: busio.UART, max_errors=20):
         """
         Initialize the HLK-LD2450 radar sensor.
@@ -309,3 +311,9 @@ class RadarSensor:
                 })
 
         return targets
+    
+    async def get_angle_x(self, range_start: float, range_end: float):
+        return map_range(self.closest['angle'], *self.angle_range, range_start, range_end)
+    
+    async def get_angle_y(self, range_start: float, range_end: float):
+        raise NotImplementedError("Radar doesn't provide an angle for the y axis")

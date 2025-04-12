@@ -21,19 +21,17 @@ import servo # type: ignore
 import asyncio # type: ignore
 import busio # type: ignore
 import microcontroller # type: ignore
-
+import neopixel # type: ignore
+import random
 
 from adafruit_debouncer import Button
 
+from eyeball import EyeBall
+from gamepad import GamePad
+from lid import Lid
 
-RED = (255, 0, 0)
-YELLOW = (255, 150, 0)
-GREEN = (0, 255, 0)
-CYAN = (0, 255, 255)
-BLUE = (0, 0, 255)
-PURPLE = (180, 0, 255)
-WHITE = (255, 255, 255)
-OFF = (0, 0, 0)
+pixel_status = neopixel.NeoPixel(board.GP23, 2)
+
 
 
 
@@ -54,8 +52,8 @@ EYEBALL_VERTICAL_RANGE = (35, 100)
 # need to give some tolerance since not all PCA boards are the same or else
 # the servos MG90s can actually go from 500 too 2500ms
 # [600-2400] translates to 599.6 us to 2.398 ms with the pi pico 2 
-min_pulse = 600
-max_pulse = 2400
+MIN_PULSE = 600
+MAX_PULSE = 2400
 
 # servos
 # 0 - eye x
@@ -78,12 +76,25 @@ i2c = busio.I2C(board.GP17, board.GP16)
 # radar_uart = busio.UART(board.GP0, board.GP1, baudrate=256000)
 radar_uart = busio.UART(board.GP24, board.GP25, baudrate=256000)
 
-button_pins: list[str] = ["GP20", "GP21"]
-buttons: dict[str, Button] = {}
+button_pins: list[int] = [20, 21]
+buttons: dict[int, Button] = {}
+
+def get_gpio(pin: int):
+    return getattr(board, f"GP{pin}")
+
+def get_pwm(pin: int, duty_cycle: int = 0, frequency: int = 50):
+    return pwmio.PWMOut(get_gpio(pin), duty_cycle = duty_cycle, frequency = frequency)
+
+def configure_servo(pin: int, min_pulse_us, max_pulse_us):
+    return servo.Servo(get_pwm(pin), min_pulse=min_pulse_us, max_pulse=max_pulse_us)
+
+async def init_servos(ports: list[int] = [0, 1, 2, 3, 4, 5, 6, 7], min_pulse=MIN_PULSE, max_pulse=MAX_PULSE):
+    for port_num in ports:
+        servos.append(configure_servo(port_num, min_pulse, max_pulse))
 
 async def init_buttons():
     for pin in button_pins:
-        button = digitalio.DigitalInOut(getattr(board, pin))
+        button = digitalio.DigitalInOut(get_gpio(pin))
         button.direction = digitalio.Direction.INPUT
         button.pull = digitalio.Pull.UP
         buttons[pin] = Button(button)
@@ -100,55 +111,107 @@ async def monitor_buttons(period_sec=0.001):
                 print(f"Button {pin} pressed")
         await asyncio.sleep(period_sec)
 
-async def servo_test():
-    global servos
+async def toggle_lids(lids: list['Lid']) -> None:
+    """
+    Toggle all of the provided lids.
 
-    # Create a PWMOut object on the control pin.
-    # pwm1 = pwmio.PWMOut(board.GP0, duty_cycle=0, frequency=50)
-    # pwm2 = pwmio.PWMOut(board.GP1, duty_cycle=0, frequency=50)
-    # pwm3 = pwmio.PWMOut(board.GP2, duty_cycle=0, frequency=50)
-    # pwm4 = pwmio.PWMOut(board.GP3, duty_cycle=0, frequency=50)
-    pwm5 = pwmio.PWMOut(board.GP4, duty_cycle=0, frequency=50)
-    pwm6 = pwmio.PWMOut(board.GP5, duty_cycle=0, frequency=50)
-    pwm7 = pwmio.PWMOut(board.GP6, duty_cycle=0, frequency=50)
-    pwm8 = pwmio.PWMOut(board.GP7, duty_cycle=0, frequency=50)
+    :param lids: A list of Lid objects to toggle
+    :return: None
+    """
+    for lid in lids:
+        lid.close()
+
+    await asyncio.sleep(0.3)
+    
+    for lid in lids:
+        lid.open()
+
+    await asyncio.sleep(0.3)
+
+async def handle_lids(pad: GamePad, radar: RadarSensor, lids: list['Lid']):
+    global auto_blink, last_blink, blink_range
+
+    now = time.monotonic()
+    if pad.button_x.value:
+        await toggle_lids(lids)
+    elif pad.button_y.value:
+        await toggle_lids(lids[:2])
+    elif pad.button_a.value:
+        await toggle_lids(lids[2:])
+    elif pad.button_b.value:
+        auto_blink = not auto_blink
+    else:
+        if auto_blink and now - last_blink > random.uniform(*blink_range):
+            if radar.running and radar.closest is None:
+                await close_lids(lids)
+            else:
+                last_blink = now
+                await toggle_lids(lids)
+async def calibrate(pad: GamePad, servo):
+
+    if pad.button_x.value:
+        # pad.reset_test_angle()
+        await open_lids(lids)
+        if servo:
+            servo.angle = 180
+    elif pad.button_y.value:
+        # pad.decrement_test_angle()
+        pass
+    elif pad.button_a.value:
+        # pad.increment_test_angle()
+        pass
+    if pad.button_b.value:
+        # pad.toggle_calibrating_delta()
+        await close_lids(lids)
+        if servo:
+            servo.angle = 0
 
 
-    # # You might need to calibrate the min_pulse (pulse at 0 degrees) and max_pulse (pulse at 180 degrees) to get an accurate servo angle.
-    # # The pulse range is 750 - 2250 by default (if not defined).
+async def populate_lids(settings = None):
+    # Setup lids
+    lid_top_left = Lid(servos[2], angle_close=100, angle_open=180)
+    lids.append(lid_top_left)
 
-    # # Initialize Servo objects.
-    # servo1 = servo.Servo(pwm1, min_pulse=min_pulse, max_pulse=max_pulse)
-    # servo2 = servo.Servo(pwm2, min_pulse=min_pulse, max_pulse=max_pulse)
-    # servo3 = servo.Servo(pwm3, min_pulse=min_pulse, max_pulse=max_pulse)
-    # servo4 = servo.Servo(pwm4, min_pulse=min_pulse, max_pulse=max_pulse)
-    servo5 = servo.Servo(pwm5, min_pulse=min_pulse, max_pulse=max_pulse)
-    servo6 = servo.Servo(pwm6, min_pulse=min_pulse, max_pulse=max_pulse)
-    servo7 = servo.Servo(pwm7, min_pulse=min_pulse, max_pulse=max_pulse)
-    servo8 = servo.Servo(pwm8, min_pulse=min_pulse, max_pulse=max_pulse)
+    lid_bottom_left = Lid(servos[3], angle_close=80, angle_open=0)
+    lids.append(lid_bottom_left)
 
-    # servos = [servo1, servo2, servo3, servo4, servo5, servo6, servo7, servo8]
-    servos = [servo5, servo6, servo7, servo8]
+    lid_top_right = Lid(servos[4], angle_close=180, angle_open=100)
+    lids.append(lid_top_right)
+
+    lid_bottom_right = Lid(servos[5], angle_close=0, angle_open=80)
+    lids.append(lid_bottom_right)
+
+async def close_lids(lids: list['Lid']):
+    if lids:
+        if DEBUG_LOG: print("closing lids")
+        for lid in lids:
+            lid.close()
+        await asyncio.sleep(0.3)
+
+async def open_lids(lids: list['Lid']):
+    if lids:
+        if DEBUG_LOG: print("opening lids")
+        for lid in lids:
+            lid.open()
+        await asyncio.sleep(0.3)
+
+
+async def move_eyeball(pad: GamePad, eyeball: EyeBall, radar: RadarSensor):
 
     while True:
-        # Sweep from 0 to 180
-        for angle in range(0, 181, 10):
-            for i, s in enumerate(servos):
-                print(f'servo {i}: {angle}')
-                s.angle = angle
-            await asyncio.sleep(0.1)
-        
-        await asyncio.sleep(3)
+        if pad.button_select.value:
+            await calibrate(pad, servos[15])
+        else:
+            lid_task = asyncio.create_task(handle_lids(pad, radar, lids))
+            eye_task = asyncio.create_task(eyeball.update(pad, radar))
 
-        # Sweep from 180 back to 0
-        for angle in range(180, -1, -10):
-            for i, s in enumerate(servos):
-                print(f'servo {i}: {angle}')
-                s.angle = angle
-            await asyncio.sleep(0.1)
+            await asyncio.gather(lid_task, eye_task)
+            
+            if DEBUG_LOG and eyeball.has_changed():
+                print(eyeball.status())
 
-        await asyncio.sleep(3)
-        
+        await asyncio.sleep(0.01)
+
 async def print_devices(i2c_bus):
     while not i2c_bus.try_lock():
         print("waiting for i2c...")
@@ -175,20 +238,25 @@ async def main():
     import gc
     gc.collect()
 
+    tasks = []
+
     import supervisor # type: ignore
     supervisor.runtime.autoreload = False  # CirPy 8 and above
     print("supervisor.runtime.autoreload = False")
+    tasks.append(asyncio.create_task(gc_cleanup()))
 
     await print_devices(i2c)
+    await init_servos()
+    await populate_lids()
 
+    eye = EyeBall(servos[0], servos[1], *EYEBALL_HORIZONTAL_RANGE, *EYEBALL_VERTICAL_RANGE)
+    gamepad = GamePad(i2c, debug=False)
     radar_sensor = RadarSensor(radar_uart)
 
 
-    tasks = []
-    tasks.append(asyncio.create_task(gc_cleanup()))
-    tasks.append(asyncio.create_task(servo_test()))
     tasks.append(asyncio.create_task(monitor_buttons()))
-    tasks.append(asyncio.create_task(radar_sensor.run(debug=True)))
+    tasks.append(asyncio.create_task(gamepad.run()))
+    tasks.append(asyncio.create_task(move_eyeball(gamepad, eye, radar_sensor)))
 
     await asyncio.gather(*tasks)
 
