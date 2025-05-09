@@ -26,13 +26,13 @@ import random
 
 from adafruit_debouncer import Button
 
+from WiFiManager import WiFiManager
 from eyeball import EyeBall
 from gamepad import GamePad
 from lid import Lid
+from statuslight import StatusLight, COLORS
 
-pixel_status = neopixel.NeoPixel(board.GP23, 2)
-
-
+status_light = StatusLight(neopixel.NeoPixel(board.GP23, 2))
 
 
 """
@@ -66,7 +66,7 @@ MAX_PULSE = 2400
 servos = []
 lids = []
 last_blink = 0
-auto_blink = True
+auto_blink = False
 blink_range = (3, 7)
 
 DEBUG_LOG = True
@@ -78,6 +78,8 @@ radar_uart = busio.UART(board.GP24, board.GP25, baudrate=256000)
 
 button_pins: list[int] = [20, 21]
 buttons: dict[int, Button] = {}
+
+
 
 def get_gpio(pin: int):
     return getattr(board, f"GP{pin}")
@@ -147,23 +149,23 @@ async def handle_lids(pad: GamePad, radar: RadarSensor, lids: list['Lid']):
             else:
                 last_blink = now
                 await toggle_lids(lids)
-async def calibrate(pad: GamePad, servo):
 
-    if pad.button_x.value:
-        # pad.reset_test_angle()
-        await open_lids(lids)
-        if servo:
+async def calibrate(pad: GamePad, servo):
+    await status_light.update(COLORS['blue'])
+    if servo:
+        if pad.button_x.value:
+            # pad.reset_test_angle()
+            await open_lids(lids)
             servo.angle = 180
-    elif pad.button_y.value:
-        # pad.decrement_test_angle()
-        pass
-    elif pad.button_a.value:
-        # pad.increment_test_angle()
-        pass
-    if pad.button_b.value:
-        # pad.toggle_calibrating_delta()
-        await close_lids(lids)
-        if servo:
+        elif pad.button_y.value:
+            # pad.decrement_test_angle()
+            pass
+        elif pad.button_a.value:
+            # pad.increment_test_angle()
+            pass
+        if pad.button_b.value:
+            # pad.toggle_calibrating_delta()
+            await close_lids(lids)
             servo.angle = 0
 
 
@@ -200,10 +202,10 @@ async def move_eyeball(pad: GamePad, eyeball: EyeBall, radar: RadarSensor):
 
     while True:
         if pad.button_select.value:
-            await calibrate(pad, servos[15])
+            await calibrate(pad, servos[7])
         else:
             lid_task = asyncio.create_task(handle_lids(pad, radar, lids))
-            eye_task = asyncio.create_task(eyeball.update(pad, radar))
+            eye_task = asyncio.create_task(eyeball.update(pad, radar, status_light))
 
             await asyncio.gather(lid_task, eye_task)
             
@@ -232,6 +234,10 @@ async def gc_cleanup(interval=10):
         if DEBUG_LOG: print(f'free: {gc.mem_free() / 1000:.2f}kB allocated: {gc.mem_alloc()/ 1000:.2f}kB')        
         await asyncio.sleep(interval)
 
+async def start_wifi(tx_pin, rx_pin, port=8080):
+    wifi_manager = WiFiManager(get_gpio(tx_pin), get_gpio(rx_pin), port=port) # uart 1
+    await wifi_manager.start_ap("RoboEyes")
+    await wifi_manager.process_uart_data()
 
 async def main():
 
@@ -245,19 +251,22 @@ async def main():
     print("supervisor.runtime.autoreload = False")
     tasks.append(asyncio.create_task(gc_cleanup()))
 
+
+    await status_light.update(COLORS['red'])
     await print_devices(i2c)
     await init_servos()
     await populate_lids()
 
-    eye = EyeBall(servos[0], servos[1], *EYEBALL_HORIZONTAL_RANGE, *EYEBALL_VERTICAL_RANGE)
+    eye = EyeBall(servos[0], servos[1], *EYEBALL_HORIZONTAL_RANGE, *EYEBALL_VERTICAL_RANGE, debug=True)
     gamepad = GamePad(i2c, debug=False)
     radar_sensor = RadarSensor(radar_uart)
 
-
+    # tasks.append(asyncio.create_task(start_wifi(28, 29)))
     tasks.append(asyncio.create_task(monitor_buttons()))
     tasks.append(asyncio.create_task(gamepad.run()))
     tasks.append(asyncio.create_task(move_eyeball(gamepad, eye, radar_sensor)))
 
+    
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":

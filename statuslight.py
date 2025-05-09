@@ -14,6 +14,22 @@ class StatusLight:
     def __init__(self, pixel: neopixel):
         self.pixel = pixel
 
-    async def change_color(self, color: tuple[int, int, int]):
+    async def clear(self):
+        self.pixel.fill((0, 0, 0))
+        self.pixel.show()
+
+    async def update(self, color: tuple[int, int, int]):
         self.pixel.fill(color)
+        self.pixel.show()
+
+    async def update_rgb(self, r: int, g: int, b: int):
+        self.pixel.fill((r, g, b))
+        self.pixel.show()
+
+    async def update_index(self, index: int, color: tuple[int, int, int]):
+        self.pixel[index] = color
+        self.pixel.show()
+
+    async def update_index_rgb(self, index: int, r: int, g: int, b: int):
+        self.pixel[index] = (r, g, b)
         self.pixel.show()

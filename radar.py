@@ -23,7 +23,7 @@ MIN_VALUE = const(-MAX_VALUE)
 BUFFER_SIZE = const(FRAME_HEADER_LENGTH + BODY_LENTH + TAIL_LENGTH)
 
 class Targets:
-    def __init__(self, angle_range=(150,30)):
+    def __init__(self, angle_range=(142,32)):
         self._targets = []
         self._angle_range = angle_range
     
@@ -172,9 +172,10 @@ class RadarSensor(EyeAngleProvider):
 
     def _trigger_fn(self, interval_seconds=3):
         current_time = time.time()
-        result = current_time - self._debug_time > interval_seconds
-        if current_time - self._debug_time > interval_seconds + 1: self._debug_time = current_time
-        # print(f"current_time: {current_time}, self._debug_time: {self._debug_time} result: {result}")
+        delta = current_time - self._debug_time
+        result = delta >= interval_seconds
+        if result: 
+            self._debug_time = current_time
         return result
 
     async def run(self, debug=False, sampling_rate=0.01):
@@ -205,7 +206,7 @@ class RadarSensor(EyeAngleProvider):
         if self._debug_trigger:
             self._debug_trigger.update()
             # print(f"value: {self._debug_trigger.value} fell: {self._debug_trigger.fell} rose: {self._debug_trigger.rose}")
-            if self._debug_trigger.fell or self._debug_trigger.rose:
+            if self._debug_trigger.rose:
                 print(f"uart: {self._uart.in_waiting}")
 
         """Process the current frame of radar data."""
@@ -229,7 +230,8 @@ class RadarSensor(EyeAngleProvider):
     async def _process_frame(self, frame_data):
         """Process a single frame of data asynchronously."""
         targets = await self.parse_frame(frame_data)
-        if self._debug_trigger: print(f"targets: {targets}")
+        if self._debug_trigger and self._debug_trigger.rose:
+            print(f"targets: {targets}")
         self._targets_handler.targets = targets
 
     
@@ -293,7 +295,7 @@ class RadarSensor(EyeAngleProvider):
                 # Update kalman filters
                 angle = self.compute_angle_degrees(x, y)
 
-                # self.update_min_max(x, y, angle)
+                self.update_min_max(x, y, angle)
                 # x_Filter, y_Filter = self.update_filters(x, y)
 
                 # Add target to list
@@ -306,7 +308,7 @@ class RadarSensor(EyeAngleProvider):
                     # 'y': (y, y_Filter, self.y_min, self.y_max),
                     # 'x': (x, (self.x_min, self.x_max)),
                     # 'y': (y, (self.y_min, self.y_max)),
-                    # 'angle': (angle, (self.angle_min, self.angle_max)),
+                    'angle_min_max': (self.angle_min, self.angle_max),
                     'speed': speed,
                 })
 

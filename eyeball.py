@@ -4,7 +4,7 @@ from gamepad import GamePad
 from radar import RadarSensor
 from neopixel import NeoPixel
 from adafruit_simplemath import map_unconstrained_range, map_range
-from statuslight import StatusLight
+from statuslight import COLORS, StatusLight
 class EyeBall:
     def __init__(self, 
                  servo_x: servo.Servo, servo_y: servo.Servo,
@@ -29,7 +29,7 @@ class EyeBall:
 
         self.status_light = status_light
         self.changed = False
-        self.debug = debug
+        self._debug = debug
 
     def __str__(self):
         return f"EyeBall(servo_x={self.servo_x}, servo_y={self.servo_y})"
@@ -37,19 +37,28 @@ class EyeBall:
     def __repr__(self):
         return self.__str__()
     
+    @property
+    def debug(self):
+        return self._debug
+    
+    @debug.setter
+    def debug(self, value):
+        self._debug = value
+
     def status(self):
         return f"eyeball: {self.last_angle_x}, {self.last_angle_y}"
 
     def get_default_angle_xy(self):
         return self.default_angle_xy
 
-    async def update(self, pad: GamePad, radar: RadarSensor):
+    async def update(self, pad: GamePad, radar: RadarSensor, status_light: StatusLight):
         angle_x, angle_y = self.get_default_angle_xy()
 
         if pad.button_start.value:
+            await status_light.update(COLORS['purple'])
             # Move the eyeballs to the closest target
             if not radar.running and not radar.failed:
-                asyncio.create_task(radar.run(debug=True))
+                asyncio.create_task(radar.run(debug=self._debug))
             else:
                 if radar.closest:
                     closest = radar.closest
@@ -57,6 +66,7 @@ class EyeBall:
                     # Radar doesn't provide an angle for the y axis, so we use the gamepad
                     angle_y = await pad.get_angle_y(self.start_angle_y, self.stop_angle_y)
         else:
+            await status_light.update(COLORS['green'])
             if radar.running: radar.stop()
             # Move the eyeballs with the gamepad
             angle_x = await pad.get_angle_x(self.start_angle_x, self.stop_angle_x)
